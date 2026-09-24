@@ -96,7 +96,7 @@ pub(crate) fn parse_database_url(raw: &str) -> Result<String, ConfigError> {
     let stripped_base = decoded_base.trim_start_matches('/');
     if stripped_base.len() >= 5 && stripped_base[..5].eq_ignore_ascii_case("file:") {
         let suffix = &stripped_base[5..];
-        if suffix.is_empty() {
+        if suffix.is_empty() || suffix.bytes().all(|b| b == b'/') {
             return Err(ConfigError::InvalidDatabasePath);
         }
         if suffix.eq_ignore_ascii_case(":memory:") {
@@ -212,6 +212,22 @@ mod tests {
     #[test]
     fn parse_database_url_rejects_bare_file_uri_temporary_databases() {
         for raw in ["sqlite:file:", "sqlite://file:"] {
+            assert_eq!(
+                parse_database_url(raw),
+                Err(ConfigError::InvalidDatabasePath)
+            );
+        }
+    }
+
+    #[test]
+    fn parse_database_url_rejects_empty_file_uri_paths() {
+        for raw in [
+            "sqlite:file://",
+            "sqlite://file://",
+            "sqlite:file:%2F%2F",
+            "sqlite:file://%2f%2f",
+            "sqlite:file://?cache=shared",
+        ] {
             assert_eq!(
                 parse_database_url(raw),
                 Err(ConfigError::InvalidDatabasePath)
