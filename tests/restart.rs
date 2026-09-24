@@ -69,28 +69,52 @@ async fn http_roundtrip(port: u16, request: &str) -> std::io::Result<(u16, Strin
     Ok((status, body.to_owned()))
 }
 
-async fn wait_for_health(port: u16) {
-    for _ in 0..200 {
+async fn wait_for_health(port: u16, child: &mut tokio::process::Child) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
         let request =
             format!("GET /health HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
         if http_roundtrip(port, &request)
             .await
             .is_ok_and(|(status, _)| status == 200)
         {
-            return;
+            return true;
+        }
+        // The child may have exited early (for example because it lost the race
+        // to bind its reserved port); detect that instead of waiting out the
+        // deadline.
+        if child.try_wait().ok().flatten().is_some() {
+            return false;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
-    panic!("server did not become healthy in time");
+}
+
+/// Spawns the server on a freshly reserved port and retries with another fresh
+/// port if the child exits before becoming healthy, which can happen when
+/// another process binds the reserved port between reservation and bind.
+async fn spawn_healthy_server(database_url: &str) -> (u16, tokio::process::Child) {
+    const MAX_ATTEMPTS: u32 = 5;
+    for _ in 0..MAX_ATTEMPTS {
+        let port = reserve_local_port();
+        let mut child = spawn_server(database_url, port);
+        if wait_for_health(port, &mut child).await {
+            return (port, child);
+        }
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+    }
+    panic!("server did not become healthy after {MAX_ATTEMPTS} attempts");
 }
 
 #[tokio::test]
 async fn delivery_survives_full_process_restart() {
     let db = common::TestDb::new();
 
-    let port1 = reserve_local_port();
-    let mut first = spawn_server(&db.url(), port1);
-    wait_for_health(port1).await;
+    let (port1, mut first) = spawn_healthy_server(&db.url()).await;
 
     let payload = json!({ "event": "invoice.created", "invoice_id": "inv_456" });
     let body_text = serde_json::to_string(
@@ -113,9 +137,7 @@ async fn delivery_survives_full_process_restart() {
     first.kill().await.expect("kill first process");
     first.wait().await.expect("wait for first process");
 
-    let port2 = reserve_local_port();
-    let mut second = spawn_server(&db.url(), port2);
-    wait_for_health(port2).await;
+    let (port2, mut second) = spawn_healthy_server(&db.url()).await;
 
     let request = format!(
         "GET /v1/deliveries/{id} HTTP/1.1\r\nHost: 127.0.0.1:{port2}\r\nConnection: close\r\n\r\n"

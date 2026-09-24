@@ -255,6 +255,31 @@ enum Frame {
     },
 }
 
+/// Owns the parser frame stack and disposes any values still held by open
+/// frames iteratively when parsing fails, so invalid deeply nested input
+/// cannot overflow the stack during drop.
+struct FrameStack(Vec<Frame>);
+
+impl Drop for FrameStack {
+    fn drop(&mut self) {
+        let frames = std::mem::take(&mut self.0);
+        for frame in frames {
+            match frame {
+                Frame::Object { map, .. } => {
+                    for value in map.into_values() {
+                        deep_drop(value);
+                    }
+                }
+                Frame::Array { items } => {
+                    for value in items {
+                        deep_drop(value);
+                    }
+                }
+            }
+        }
+    }
+}
+
 enum Outcome {
     Done(Value),
     Next(Step),
@@ -265,7 +290,9 @@ fn deliver(stack: &mut [Frame], value: Value) -> Outcome {
         None => Outcome::Done(value),
         Some(Frame::Object { map, pending_key }) => {
             if let Some(key) = pending_key.take() {
-                map.insert(key, value);
+                if let Some(replaced) = map.insert(key, value) {
+                    deep_drop(replaced);
+                }
             }
             Outcome::Next(Step::ObjCommaOrEnd)
         }
@@ -280,6 +307,9 @@ fn close_frame(stack: &mut Vec<Frame>) -> Option<Value> {
     match stack.pop()? {
         Frame::Object { map, pending_key } => {
             if pending_key.is_some() {
+                for value in map.into_values() {
+                    deep_drop(value);
+                }
                 return None;
             }
             Some(Value::Object(map))
@@ -290,7 +320,12 @@ fn close_frame(stack: &mut Vec<Frame>) -> Option<Value> {
 
 fn finish(p: &mut Parser, value: Value) -> Option<Value> {
     p.skip_ws();
-    (p.pos == p.bytes.len()).then_some(value)
+    if p.pos == p.bytes.len() {
+        Some(value)
+    } else {
+        deep_drop(value);
+        None
+    }
 }
 
 fn open_container(p: &mut Parser, stack: &mut Vec<Frame>, b: u8) -> Step {
@@ -316,7 +351,7 @@ fn iterative_parse(bytes: &[u8]) -> Option<Value> {
     p.skip_ws();
     p.peek()?;
 
-    let mut stack: Vec<Frame> = Vec::new();
+    let mut stack = FrameStack(Vec::new());
     let mut step = Step::Value;
 
     loop {
@@ -325,10 +360,10 @@ fn iterative_parse(bytes: &[u8]) -> Option<Value> {
                 p.skip_ws();
                 let b = p.peek()?;
                 if b == b'{' || b == b'[' {
-                    step = open_container(&mut p, &mut stack, b);
+                    step = open_container(&mut p, &mut stack.0, b);
                 } else {
                     let value = parse_scalar(&mut p)?;
-                    match deliver(&mut stack, value) {
+                    match deliver(&mut stack.0, value) {
                         Outcome::Done(v) => return finish(&mut p, v),
                         Outcome::Next(next) => step = next,
                     }
@@ -340,14 +375,14 @@ fn iterative_parse(bytes: &[u8]) -> Option<Value> {
                 let b = p.peek()?;
                 if b == b'}' {
                     p.bump();
-                    let value = close_frame(&mut stack)?;
-                    match deliver(&mut stack, value) {
+                    let value = close_frame(&mut stack.0)?;
+                    match deliver(&mut stack.0, value) {
                         Outcome::Done(v) => return finish(&mut p, v),
                         Outcome::Next(next) => step = next,
                     }
                 } else if b == b'"' {
                     let key = parse_string(&mut p)?;
-                    match stack.last_mut() {
+                    match stack.0.last_mut() {
                         Some(Frame::Object { pending_key, .. }) => *pending_key = Some(key),
                         _ => return None,
                     }
@@ -363,7 +398,7 @@ fn iterative_parse(bytes: &[u8]) -> Option<Value> {
                     return None;
                 }
                 let key = parse_string(&mut p)?;
-                match stack.last_mut() {
+                match stack.0.last_mut() {
                     Some(Frame::Object { pending_key, .. }) => *pending_key = Some(key),
                     _ => return None,
                 }
@@ -384,16 +419,16 @@ fn iterative_parse(bytes: &[u8]) -> Option<Value> {
                 let b = p.peek()?;
                 if b == b']' {
                     p.bump();
-                    let value = close_frame(&mut stack)?;
-                    match deliver(&mut stack, value) {
+                    let value = close_frame(&mut stack.0)?;
+                    match deliver(&mut stack.0, value) {
                         Outcome::Done(v) => return finish(&mut p, v),
                         Outcome::Next(next) => step = next,
                     }
                 } else if b == b'{' || b == b'[' {
-                    step = open_container(&mut p, &mut stack, b);
+                    step = open_container(&mut p, &mut stack.0, b);
                 } else {
                     let value = parse_scalar(&mut p)?;
-                    match deliver(&mut stack, value) {
+                    match deliver(&mut stack.0, value) {
                         Outcome::Done(v) => return finish(&mut p, v),
                         Outcome::Next(next) => step = next,
                     }
@@ -405,8 +440,8 @@ fn iterative_parse(bytes: &[u8]) -> Option<Value> {
                 let b = p.peek()?;
                 if b == b'}' {
                     p.bump();
-                    let value = close_frame(&mut stack)?;
-                    match deliver(&mut stack, value) {
+                    let value = close_frame(&mut stack.0)?;
+                    match deliver(&mut stack.0, value) {
                         Outcome::Done(v) => return finish(&mut p, v),
                         Outcome::Next(next) => step = next,
                     }
@@ -422,10 +457,10 @@ fn iterative_parse(bytes: &[u8]) -> Option<Value> {
                 p.skip_ws();
                 let b = p.peek()?;
                 if b == b'{' || b == b'[' {
-                    step = open_container(&mut p, &mut stack, b);
+                    step = open_container(&mut p, &mut stack.0, b);
                 } else {
                     let value = parse_scalar(&mut p)?;
-                    match deliver(&mut stack, value) {
+                    match deliver(&mut stack.0, value) {
                         Outcome::Done(v) => return finish(&mut p, v),
                         Outcome::Next(next) => step = next,
                     }
@@ -437,8 +472,8 @@ fn iterative_parse(bytes: &[u8]) -> Option<Value> {
                 let b = p.peek()?;
                 if b == b']' {
                     p.bump();
-                    let value = close_frame(&mut stack)?;
-                    match deliver(&mut stack, value) {
+                    let value = close_frame(&mut stack.0)?;
+                    match deliver(&mut stack.0, value) {
                         Outcome::Done(v) => return finish(&mut p, v),
                         Outcome::Next(next) => step = next,
                     }
@@ -939,5 +974,44 @@ mod tests {
             serialized
         });
         assert_eq!(out, text);
+    }
+
+    #[test]
+    fn duplicate_key_replaces_deep_value_without_overflowing_small_stack() {
+        let mut text = String::from("{\"x\":");
+        text.push_str(&deep_array(50_000));
+        text.push_str(",\"x\":null}");
+        let input = text.clone();
+        let out = run_on_small_stack(move || {
+            let value = parse_value(input.as_bytes()).unwrap();
+            assert_eq!(value, serde_json::json!({ "x": null }));
+            deep_drop(value);
+            String::new()
+        });
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn rejects_trailing_garbage_after_deep_root_on_small_stack() {
+        let mut text = deep_array(50_000);
+        text.push_str(" extra");
+        let input = text.clone();
+        let out = run_on_small_stack(move || {
+            assert_eq!(parse_value(input.as_bytes()), Err(InvalidJson));
+            String::new()
+        });
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn rejects_truncated_document_with_deep_value_in_open_frame_on_small_stack() {
+        let mut text = String::from("[{\"a\":");
+        text.push_str(&deep_array(50_000));
+        let input = text.clone();
+        let out = run_on_small_stack(move || {
+            assert_eq!(parse_value(input.as_bytes()), Err(InvalidJson));
+            String::new()
+        });
+        assert!(out.is_empty());
     }
 }
