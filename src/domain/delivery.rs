@@ -2,6 +2,8 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 use uuid::Uuid;
 
+use crate::json::DeepDroppableValue;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeliveryStatus {
     Pending,
@@ -42,7 +44,7 @@ impl Delivery {
 pub struct NewDelivery {
     pub idempotency_key: String,
     pub target_url: String,
-    pub payload: Value,
+    pub payload: DeepDroppableValue,
     pub status: DeliveryStatus,
     pub attempts: u32,
 }
@@ -52,7 +54,7 @@ impl NewDelivery {
         Self {
             idempotency_key,
             target_url,
-            payload,
+            payload: DeepDroppableValue::new(payload),
             status: DeliveryStatus::Pending,
             attempts: 0,
         }

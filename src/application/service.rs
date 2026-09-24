@@ -39,38 +39,27 @@ impl<R: DeliveryRepository> DeliveryService<R> {
             return Err(err);
         }
 
-        let mut new = NewDelivery::new(key, target_url.to_owned(), payload);
+        let new = NewDelivery::new(key, target_url.to_owned(), payload);
 
-        let outcome = self.repository.enqueue(&new).await;
-        let incoming_payload = std::mem::replace(&mut new.payload, Value::Null);
-
-        match outcome {
-            Ok(EnqueueOutcome::Created(delivery)) => {
-                crate::json::deep_drop(incoming_payload);
-                Ok(EnqueueResult {
-                    delivery,
-                    created: true,
-                })
-            }
+        match self.repository.enqueue(&new).await {
+            Ok(EnqueueOutcome::Created(delivery)) => Ok(EnqueueResult {
+                delivery,
+                created: true,
+            }),
             Ok(EnqueueOutcome::Existing(existing)) => {
                 if existing.target_url == new.target_url
-                    && crate::json::values_equal(&existing.payload, &incoming_payload)
+                    && crate::json::values_equal(&existing.payload, &new.payload)
                 {
-                    crate::json::deep_drop(incoming_payload);
                     Ok(EnqueueResult {
                         delivery: existing,
                         created: false,
                     })
                 } else {
                     crate::json::deep_drop(existing.payload);
-                    crate::json::deep_drop(incoming_payload);
                     Err(EnqueueError::IdempotencyConflict)
                 }
             }
-            Err(err) => {
-                crate::json::deep_drop(incoming_payload);
-                Err(err)
-            }
+            Err(err) => Err(err),
         }
     }
 
@@ -193,7 +182,7 @@ mod tests {
             *self.captured.lock().unwrap() = Some(new.clone());
             Ok(EnqueueOutcome::Created(stub_delivery(
                 &new.target_url,
-                new.payload.clone(),
+                &new.payload,
             )))
         }
 
@@ -202,11 +191,11 @@ mod tests {
         }
     }
 
-    fn stub_delivery(target_url: &str, payload: Value) -> Delivery {
+    fn stub_delivery(target_url: &str, payload: &Value) -> Delivery {
         Delivery {
             id: Uuid::new_v4(),
             target_url: target_url.to_owned(),
-            payload,
+            payload: payload.clone(),
             status: crate::domain::DeliveryStatus::Pending,
             attempts: 0,
             created_at: chrono::Utc::now(),
@@ -215,7 +204,7 @@ mod tests {
 
     #[tokio::test]
     async fn enqueue_returns_created_for_new_delivery() {
-        let delivery = stub_delivery("https://example.test/hook", serde_json::json!({ "a": 1 }));
+        let delivery = stub_delivery("https://example.test/hook", &serde_json::json!({ "a": 1 }));
         let service = DeliveryService::new(StubRepo {
             outcome: EnqueueOutcome::Created(delivery.clone()),
         });
@@ -235,7 +224,7 @@ mod tests {
 
     #[tokio::test]
     async fn enqueue_replays_existing_delivery_with_identical_content() {
-        let existing = stub_delivery("https://example.test/hook", serde_json::json!({ "a": 1 }));
+        let existing = stub_delivery("https://example.test/hook", &serde_json::json!({ "a": 1 }));
         let service = DeliveryService::new(StubRepo {
             outcome: EnqueueOutcome::Existing(existing.clone()),
         });
@@ -255,7 +244,7 @@ mod tests {
 
     #[tokio::test]
     async fn enqueue_conflicts_when_existing_payload_differs() {
-        let existing = stub_delivery("https://example.test/hook", serde_json::json!({ "a": 2 }));
+        let existing = stub_delivery("https://example.test/hook", &serde_json::json!({ "a": 2 }));
         let service = DeliveryService::new(StubRepo {
             outcome: EnqueueOutcome::Existing(existing),
         });
@@ -273,7 +262,7 @@ mod tests {
 
     #[tokio::test]
     async fn enqueue_conflicts_when_existing_target_url_differs() {
-        let existing = stub_delivery("https://example.test/other", serde_json::json!({ "a": 1 }));
+        let existing = stub_delivery("https://example.test/other", &serde_json::json!({ "a": 1 }));
         let service = DeliveryService::new(StubRepo {
             outcome: EnqueueOutcome::Existing(existing),
         });
@@ -312,5 +301,58 @@ mod tests {
             .expect("repository received the new delivery");
         assert_eq!(new.status, crate::domain::DeliveryStatus::Pending);
         assert_eq!(new.attempts, 0);
+    }
+
+    fn build_deep_payload(depth: usize) -> Value {
+        let mut payload = Value::from(0);
+        for _ in 0..depth {
+            payload = Value::Array(vec![payload]);
+        }
+        payload
+    }
+
+    struct HangingRepo;
+
+    #[async_trait::async_trait]
+    impl DeliveryRepository for HangingRepo {
+        async fn enqueue(&self, _new: &NewDelivery) -> Result<EnqueueOutcome, EnqueueError> {
+            std::future::pending::<()>().await;
+            unreachable!("repository never completes")
+        }
+
+        async fn get_by_id(&self, _id: Uuid) -> Result<Option<Delivery>, QueryError> {
+            Ok(None)
+        }
+    }
+
+    #[test]
+    fn dropping_cancelled_enqueue_future_with_deep_payload_is_stack_safe() {
+        std::thread::Builder::new()
+            .stack_size(2 << 20)
+            .spawn(|| {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .build()
+                    .expect("current-thread runtime builds");
+
+                runtime.block_on(async {
+                    let service = DeliveryService::new(HangingRepo);
+                    let payload = build_deep_payload(50_000);
+                    let handle = tokio::spawn(async move {
+                        let _ = service
+                            .enqueue(Some("key-1"), "https://example.test/hook", payload)
+                            .await;
+                    });
+
+                    // Let the spawned task run until it suspends inside
+                    // HangingRepo::enqueue, then cancel it. Dropping the suspended
+                    // future must destroy the deep payload iteratively instead of
+                    // recursing through it on this small stack.
+                    tokio::task::yield_now().await;
+                    handle.abort();
+                });
+            })
+            .expect("small-stack test thread starts")
+            .join()
+            .expect("small-stack test thread completes");
     }
 }

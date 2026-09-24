@@ -93,6 +93,17 @@ pub(crate) fn parse_database_url(raw: &str) -> Result<String, ConfigError> {
         return Err(ConfigError::InMemoryDatabaseUrl);
     }
 
+    let stripped_base = decoded_base.trim_start_matches('/');
+    if stripped_base.len() >= 5 && stripped_base[..5].eq_ignore_ascii_case("file:") {
+        let suffix = &stripped_base[5..];
+        if suffix.is_empty() {
+            return Err(ConfigError::InvalidDatabasePath);
+        }
+        if suffix.eq_ignore_ascii_case(":memory:") {
+            return Err(ConfigError::InMemoryDatabaseUrl);
+        }
+    }
+
     if let Some(query) = query {
         for pair in query.split('&') {
             let decoded = percent_decode(pair.as_bytes())
@@ -180,6 +191,41 @@ mod tests {
                 parse_database_url(raw),
                 Err(ConfigError::InMemoryDatabaseUrl)
             );
+        }
+    }
+
+    #[test]
+    fn parse_database_url_rejects_file_uri_in_memory_forms() {
+        for raw in [
+            "sqlite:file::memory:",
+            "sqlite://file::memory:",
+            "sqlite:file:%3Amemory%3A",
+            "sqlite:file::memory:?cache=shared",
+        ] {
+            assert_eq!(
+                parse_database_url(raw),
+                Err(ConfigError::InMemoryDatabaseUrl)
+            );
+        }
+    }
+
+    #[test]
+    fn parse_database_url_rejects_bare_file_uri_temporary_databases() {
+        for raw in ["sqlite:file:", "sqlite://file:"] {
+            assert_eq!(
+                parse_database_url(raw),
+                Err(ConfigError::InvalidDatabasePath)
+            );
+        }
+    }
+
+    #[test]
+    fn parse_database_url_accepts_file_uri_paths() {
+        for raw in [
+            "sqlite:file:/tmp/relaybox.db",
+            "sqlite://file:///var/lib/relaybox/db.sqlite",
+        ] {
+            assert_eq!(parse_database_url(raw).unwrap(), raw);
         }
     }
 

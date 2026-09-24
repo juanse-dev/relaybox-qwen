@@ -60,6 +60,34 @@ pub fn deep_drop(value: Value) {
     }
 }
 
+/// A `Value` whose destruction is guaranteed to be iterative, even when the
+/// value is deeply nested. Dropping a plain `Value` recurses through its
+/// structure, so a future cancelled while owning such a payload can overflow
+/// the stack; this wrapper routes destruction through [`deep_drop`] instead.
+#[derive(Debug, Clone)]
+pub struct DeepDroppableValue(Value);
+
+impl DeepDroppableValue {
+    pub fn new(value: Value) -> Self {
+        Self(value)
+    }
+}
+
+impl std::ops::Deref for DeepDroppableValue {
+    type Target = Value;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Drop for DeepDroppableValue {
+    fn drop(&mut self) {
+        let value = std::mem::replace(&mut self.0, Value::Null);
+        deep_drop(value);
+    }
+}
+
 /// Serializes a `Value` to compact JSON text without recursion, so deeply
 /// nested values that the parser accepts cannot overflow the stack.
 pub fn to_string(value: &Value) -> String {
@@ -1013,5 +1041,27 @@ mod tests {
             String::new()
         });
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn dropping_deep_droppable_value_is_stack_safe_on_small_stack() {
+        let text = deep_array(50_000);
+        let input = text.clone();
+        let out = run_on_small_stack(move || {
+            let value = parse_value(input.as_bytes()).unwrap();
+            let wrapped = DeepDroppableValue::new(value);
+            assert!(values_equal(&wrapped, &wrapped));
+            drop(wrapped);
+            String::new()
+        });
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn deep_droppable_value_exposes_inner_value_through_deref() {
+        let value = serde_json::json!({ "a": [1, 2, 3], "b": null });
+        let wrapped = DeepDroppableValue::new(value.clone());
+        assert_eq!(&*wrapped, &value);
+        assert!(values_equal(&wrapped, &value));
     }
 }
