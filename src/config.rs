@@ -105,6 +105,15 @@ pub(crate) fn parse_database_url(raw: &str) -> Result<String, ConfigError> {
         if suffix.is_empty() || suffix.bytes().all(|b| b == b'/') {
             return Err(ConfigError::InvalidDatabasePath);
         }
+        if let Some(tail) = suffix.strip_prefix("//") {
+            let pathname_is_empty = match tail.find('/') {
+                None => true,
+                Some(i) => tail[i + 1..].is_empty(),
+            };
+            if pathname_is_empty {
+                return Err(ConfigError::InvalidDatabasePath);
+            }
+        }
         if suffix.eq_ignore_ascii_case(":memory:") {
             return Err(ConfigError::InMemoryDatabaseUrl);
         }
@@ -120,6 +129,9 @@ pub(crate) fn parse_database_url(raw: &str) -> Result<String, ConfigError> {
                 None => continue,
             };
             if key == "mode" && value == "memory" {
+                return Err(ConfigError::InMemoryDatabaseUrl);
+            }
+            if key == "vfs" && value == "memdb" {
                 return Err(ConfigError::InMemoryDatabaseUrl);
             }
         }
@@ -262,6 +274,21 @@ mod tests {
     }
 
     #[test]
+    fn parse_database_url_rejects_memdb_vfs() {
+        for raw in [
+            "sqlite:file:/relaybox?vfs=memdb",
+            "sqlite:///tmp/relaybox.db?vfs=memdb",
+            "sqlite://relaybox.db?cache=shared&vfs=memdb",
+            "sqlite:///tmp/relaybox.db?vfs=%6demdb",
+        ] {
+            assert_eq!(
+                parse_database_url(raw),
+                Err(ConfigError::InMemoryDatabaseUrl)
+            );
+        }
+    }
+
+    #[test]
     fn parse_database_url_rejects_bare_file_uri_temporary_databases() {
         for raw in ["sqlite:file:", "sqlite://file:"] {
             assert_eq!(
@@ -292,6 +319,30 @@ mod tests {
         for raw in [
             "sqlite:file:/tmp/relaybox.db",
             "sqlite://file:///var/lib/relaybox/db.sqlite",
+        ] {
+            assert_eq!(parse_database_url(raw).unwrap(), raw);
+        }
+    }
+
+    #[test]
+    fn parse_database_url_rejects_file_uri_authority_with_empty_pathname() {
+        for raw in [
+            "sqlite:file://localhost",
+            "sqlite://file://localhost",
+            "sqlite:file://localhost/",
+        ] {
+            assert_eq!(
+                parse_database_url(raw),
+                Err(ConfigError::InvalidDatabasePath)
+            );
+        }
+    }
+
+    #[test]
+    fn parse_database_url_accepts_file_uri_authority_with_pathname() {
+        for raw in [
+            "sqlite:file:///relaybox.db",
+            "sqlite:file://localhost/relaybox.db",
         ] {
             assert_eq!(parse_database_url(raw).unwrap(), raw);
         }
