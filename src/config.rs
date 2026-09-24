@@ -70,16 +70,19 @@ pub(crate) fn parse_database_url(raw: &str) -> Result<String, ConfigError> {
     }
 
     // SQLx ignores URL fragments, so validation must see the same string it will use.
-    let without_fragment = match raw.split_once('#') {
-        Some((without_fragment, _)) => without_fragment,
+    // SQLite decodes percent-escapes before interpreting `?` and `#`, so the
+    // encoded forms `%3F`/`%23` are structural delimiters too.
+    let fragment_idx = match (raw.find('#'), find_percent_encoded(raw, "%23")) {
+        (Some(literal), Some(encoded)) => Some(literal.min(encoded)),
+        (literal, encoded) => literal.or(encoded),
+    };
+    let without_fragment = match fragment_idx {
+        Some(idx) => &raw[..idx],
         None => raw,
     };
 
     let rest = &without_fragment["sqlite:".len()..];
-    let (base, query) = match rest.split_once('?') {
-        Some((base, query)) => (base, Some(query)),
-        None => (rest, None),
-    };
+    let (base, query) = split_at_query_delimiter(rest);
 
     let decoded_base = percent_decode(base.as_bytes())
         .decode_utf8_lossy()
@@ -94,7 +97,10 @@ pub(crate) fn parse_database_url(raw: &str) -> Result<String, ConfigError> {
     }
 
     let stripped_base = decoded_base.trim_start_matches('/');
-    if stripped_base.len() >= 5 && stripped_base[..5].eq_ignore_ascii_case("file:") {
+    // Compare bytes so a multibyte character crossing offset five cannot panic.
+    let stripped_bytes = stripped_base.as_bytes();
+    if stripped_bytes.len() >= 5 && stripped_bytes[..5].eq_ignore_ascii_case(b"file:") {
+        // The first five bytes are ASCII, so this slice is on a char boundary.
         let suffix = &stripped_base[5..];
         if suffix.is_empty() || suffix.bytes().all(|b| b == b'/') {
             return Err(ConfigError::InvalidDatabasePath);
@@ -120,6 +126,26 @@ pub(crate) fn parse_database_url(raw: &str) -> Result<String, ConfigError> {
     }
 
     Ok(without_fragment.to_owned())
+}
+
+fn find_percent_encoded(haystack: &str, escape: &str) -> Option<usize> {
+    let hay = haystack.as_bytes();
+    let pat = escape.as_bytes();
+    if hay.len() < pat.len() {
+        return None;
+    }
+    (0..=hay.len() - pat.len()).find(|&i| hay[i..i + pat.len()].eq_ignore_ascii_case(pat))
+}
+
+fn split_at_query_delimiter(rest: &str) -> (&str, Option<&str>) {
+    let literal = rest.find('?');
+    let encoded = find_percent_encoded(rest, "%3F");
+    match (literal, encoded) {
+        (Some(l), Some(e)) if l <= e => (&rest[..l], Some(&rest[l + 1..])),
+        (_, Some(e)) => (&rest[..e], Some(&rest[e + 3..])),
+        (Some(l), None) => (&rest[..l], Some(&rest[l + 1..])),
+        (None, None) => (rest, None),
+    }
 }
 
 pub(crate) fn parse_bind(raw: &str) -> Result<SocketAddr, ConfigError> {
@@ -331,5 +357,59 @@ mod tests {
         for raw in ["", "localhost", "127.0.0.1", "not-an-addr"] {
             assert_eq!(parse_bind(raw), Err(ConfigError::InvalidBindAddress));
         }
+    }
+
+    #[test]
+    fn parse_database_url_handles_multibyte_filenames_without_panic() {
+        assert_eq!(
+            parse_database_url("sqlite:abcdé.db").unwrap(),
+            "sqlite:abcdé.db"
+        );
+        assert_eq!(
+            parse_database_url("sqlite://file:/var/lib/abç.db").unwrap(),
+            "sqlite://file:/var/lib/abç.db"
+        );
+    }
+
+    #[test]
+    fn parse_database_url_rejects_mixed_case_file_uri_memory() {
+        assert_eq!(
+            parse_database_url("sqlite:File::memory:"),
+            Err(ConfigError::InMemoryDatabaseUrl)
+        );
+    }
+
+    #[test]
+    fn parse_database_url_treats_encoded_query_delimiter_as_structural() {
+        for raw in [
+            "sqlite:///tmp/relaybox.db%3Fmode=memory",
+            "sqlite:file:relaybox.db%3Fmode=memory",
+            "sqlite://relaybox.db%3fmode=memory",
+        ] {
+            assert_eq!(
+                parse_database_url(raw),
+                Err(ConfigError::InMemoryDatabaseUrl)
+            );
+        }
+    }
+
+    #[test]
+    fn parse_database_url_treats_encoded_fragment_as_structural() {
+        assert_eq!(
+            parse_database_url("sqlite://relaybox.db%23session").unwrap(),
+            "sqlite://relaybox.db"
+        );
+        assert_eq!(
+            parse_database_url("sqlite::memory:%23frag"),
+            Err(ConfigError::InMemoryDatabaseUrl)
+        );
+    }
+
+    #[test]
+    fn parse_database_url_keeps_double_encoded_delimiters_in_path() {
+        assert_eq!(
+            parse_database_url("sqlite://db%253Fx").unwrap(),
+            "sqlite://db%253Fx"
+        );
     }
 }
