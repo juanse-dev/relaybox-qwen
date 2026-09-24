@@ -64,9 +64,29 @@ pub(crate) fn parse_database_url(raw: &str) -> Result<String, ConfigError> {
     if !raw.starts_with("sqlite:") {
         return Err(ConfigError::InvalidDatabaseUrl);
     }
-    if raw.contains(":memory:") || raw.contains("mode=memory") {
+
+    let rest = &raw["sqlite:".len()..];
+    let (base, query) = match rest.split_once('?') {
+        Some((base, query)) => (base, Some(query)),
+        None => (rest, None),
+    };
+
+    if base == ":memory:" || base == "//:memory:" {
         return Err(ConfigError::InMemoryDatabaseUrl);
     }
+
+    if let Some(query) = query {
+        for pair in query.split('&') {
+            let (key, value) = match pair.split_once('=') {
+                Some((key, value)) => (key, value),
+                None => continue,
+            };
+            if key == "mode" && value == "memory" {
+                return Err(ConfigError::InMemoryDatabaseUrl);
+            }
+        }
+    }
+
     Ok(raw.to_owned())
 }
 
@@ -102,12 +122,25 @@ mod tests {
         for raw in [
             "sqlite::memory:",
             "sqlite://:memory:",
+            "sqlite::memory:?cache=shared",
             "sqlite:///tmp/relaybox.db?mode=memory",
+            "sqlite:///tmp/relaybox.db?cache=shared&mode=memory",
         ] {
             assert_eq!(
                 parse_database_url(raw),
                 Err(ConfigError::InMemoryDatabaseUrl)
             );
+        }
+    }
+
+    #[test]
+    fn parse_database_url_accepts_filenames_containing_mode_memory() {
+        for raw in [
+            "sqlite://mode=memory.db",
+            "sqlite:///var/lib/mode=memory-backup.db",
+            "sqlite://relaybox.db?cache=shared",
+        ] {
+            assert_eq!(parse_database_url(raw).unwrap(), raw);
         }
     }
 

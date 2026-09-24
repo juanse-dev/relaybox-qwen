@@ -2,11 +2,12 @@ use std::sync::Arc;
 
 use axum::{
     body::Bytes,
-    extract::{Path, State},
+    extract::{Request, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
+use percent_encoding::percent_decode;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
@@ -66,9 +67,9 @@ where
         }
     };
 
-    let object = match parsed.as_object() {
-        Some(object) => object,
-        None => {
+    let mut object = match parsed {
+        Value::Object(object) => object,
+        _ => {
             return error_response(
                 StatusCode::BAD_REQUEST,
                 "invalid_request",
@@ -88,8 +89,8 @@ where
         }
     };
 
-    let payload = match object.get("payload") {
-        Some(payload) => payload.clone(),
+    let payload = match object.remove("payload") {
+        Some(payload) => payload,
         None => {
             return error_response(
                 StatusCode::BAD_REQUEST,
@@ -117,14 +118,14 @@ where
 
 pub(crate) async fn get_delivery<R>(
     State(service): State<Arc<DeliveryService<R>>>,
-    Path(id_text): Path<String>,
+    request: Request,
 ) -> Response
 where
     R: DeliveryRepository + Send + Sync + 'static,
 {
-    let id = match Uuid::parse_str(&id_text) {
-        Ok(id) => id,
-        Err(_) => return not_found(),
+    let id = match delivery_id_from_request(&request) {
+        Some(id) => id,
+        None => return not_found(),
     };
 
     match service.get_by_id(id).await {
@@ -133,6 +134,15 @@ where
         Err(QueryError::NotFound) => not_found(),
         Err(QueryError::Repository(_)) => internal_error(),
     }
+}
+
+fn delivery_id_from_request(request: &Request) -> Option<Uuid> {
+    let segment = request.uri().path().strip_prefix("/v1/deliveries/")?;
+    if segment.is_empty() || segment.contains('/') {
+        return None;
+    }
+    let decoded = percent_decode(segment.as_bytes()).decode_utf8().ok()?;
+    Uuid::parse_str(&decoded).ok()
 }
 
 pub(crate) async fn health() -> Response {

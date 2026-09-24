@@ -53,24 +53,19 @@ impl DeliveryRepository for SqliteDeliveryRepository {
 
         match sqlx::query(
             "INSERT INTO deliveries (id, idempotency_key, target_url, payload, status, attempts, created_at) \
-             VALUES (?, ?, ?, ?, 'pending', 0, ?)",
+             VALUES (?, ?, ?, ?, 'pending', 0, ?) \
+             RETURNING id, target_url, payload, status, attempts, created_at",
         )
         .bind(id.to_string())
         .bind(&new.idempotency_key)
         .bind(&new.target_url)
         .bind(&payload_text)
         .bind(&created_at)
-        .execute(&self.pool)
+        .fetch_optional(&self.pool)
         .await
         {
-            Ok(_) => Ok(EnqueueOutcome::Created(Delivery {
-                id,
-                target_url: new.target_url.clone(),
-                payload: new.payload.clone(),
-                status: DeliveryStatus::Pending,
-                attempts: 0,
-                created_at: parse_created_at(&created_at)?,
-            })),
+            Ok(Some(row)) => Ok(EnqueueOutcome::Created(delivery_from_row(&row)?)),
+            Ok(None) => Err(RepositoryError::Database("insert returned no row".to_owned()).into()),
             Err(err) if is_unique_violation(&err) => {
                 let row = sqlx::query(
                     "SELECT id, target_url, payload, status, attempts, created_at \

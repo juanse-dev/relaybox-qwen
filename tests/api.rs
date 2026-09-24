@@ -394,3 +394,71 @@ async fn post_accepts_bodies_larger_than_default_axum_limit() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(fetched["payload"], json!({ "data": big }));
 }
+
+#[tokio::test]
+async fn post_preserves_numbers_beyond_f64_precision() {
+    let db = common::TestDb::new();
+    let router = db.router().await;
+
+    let (status, created) = common::post_body(
+        &router,
+        Some("big-int"),
+        br#"{"target_url":"https://example.test/webhooks","payload":{"n":18446744073709551617}}"#
+            .to_vec(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let expected = serde_json::from_str::<Value>("18446744073709551617").expect("valid number");
+    assert_eq!(created["payload"]["n"], expected);
+
+    let (status, fetched) = common::get_delivery(&router, created["id"].as_str().unwrap()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(fetched["payload"]["n"], expected);
+
+    let (status, body) = common::post_body(
+        &router,
+        Some("big-int"),
+        br#"{"target_url":"https://example.test/webhooks","payload":{"n":18446744073709551618}}"#
+            .to_vec(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    common::assert_error(&body, "idempotency_conflict");
+}
+
+#[tokio::test]
+async fn post_accepts_out_of_range_float_literals() {
+    let db = common::TestDb::new();
+    let router = db.router().await;
+
+    let (status, created) = common::post_body(
+        &router,
+        Some("big-float"),
+        br#"{"target_url":"https://example.test/webhooks","payload":{"n":1e400}}"#.to_vec(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let expected = serde_json::from_str::<Value>("1e400").expect("valid number");
+    assert_eq!(created["payload"]["n"], expected);
+
+    let (status, fetched) = common::get_delivery(&router, created["id"].as_str().unwrap()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(fetched["payload"]["n"], expected);
+}
+
+#[tokio::test]
+async fn get_invalid_percent_encoded_id_returns_404_envelope() {
+    let db = common::TestDb::new();
+    let router = db.router().await;
+
+    let (status, body) = common::get_delivery(&router, "%FF").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    common::assert_error(&body, "delivery_not_found");
+
+    let encoded_id = "3f2c%31a5e-9b8d-4e6f-a1c2-d3e4f5a6b7c8";
+    let (status, body) = common::get_delivery(&router, encoded_id).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    common::assert_error(&body, "delivery_not_found");
+}
