@@ -22,7 +22,7 @@ impl DeliveryStatus {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Delivery {
     pub id: Uuid,
     pub target_url: String,

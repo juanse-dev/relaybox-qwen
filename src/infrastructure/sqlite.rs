@@ -9,7 +9,7 @@ use sqlx::Row;
 use uuid::Uuid;
 
 use crate::application::{
-    DeliveryRepository, EnqueueError, EnqueueResult, QueryError, RepositoryError,
+    DeliveryRepository, EnqueueError, EnqueueOutcome, QueryError, RepositoryError,
 };
 use crate::domain::{Delivery, DeliveryStatus, NewDelivery};
 
@@ -44,7 +44,7 @@ impl SqliteDeliveryRepository {
 
 #[async_trait]
 impl DeliveryRepository for SqliteDeliveryRepository {
-    async fn enqueue(&self, new: &NewDelivery) -> Result<EnqueueResult, EnqueueError> {
+    async fn enqueue(&self, new: &NewDelivery) -> Result<EnqueueOutcome, EnqueueError> {
         let id = Uuid::new_v4();
         let created_at = format_created_at(&Utc::now());
         let payload_text = serde_json::to_string(&new.payload).map_err(|err| {
@@ -63,17 +63,14 @@ impl DeliveryRepository for SqliteDeliveryRepository {
         .execute(&self.pool)
         .await
         {
-            Ok(_) => Ok(EnqueueResult {
-                delivery: Delivery {
-                    id,
-                    target_url: new.target_url.clone(),
-                    payload: new.payload.clone(),
-                    status: DeliveryStatus::Pending,
-                    attempts: 0,
-                    created_at: parse_created_at(&created_at)?,
-                },
-                created: true,
-            }),
+            Ok(_) => Ok(EnqueueOutcome::Created(Delivery {
+                id,
+                target_url: new.target_url.clone(),
+                payload: new.payload.clone(),
+                status: DeliveryStatus::Pending,
+                attempts: 0,
+                created_at: parse_created_at(&created_at)?,
+            })),
             Err(err) if is_unique_violation(&err) => {
                 let row = sqlx::query(
                     "SELECT id, target_url, payload, status, attempts, created_at \
@@ -87,16 +84,7 @@ impl DeliveryRepository for SqliteDeliveryRepository {
                 let row = row.ok_or_else(|| {
                     RepositoryError::Database("idempotent delivery row disappeared".to_owned())
                 })?;
-                let existing = delivery_from_row(&row)?;
-
-                if existing.target_url == new.target_url && existing.payload == new.payload {
-                    Ok(EnqueueResult {
-                        delivery: existing,
-                        created: false,
-                    })
-                } else {
-                    Err(EnqueueError::IdempotencyConflict)
-                }
+                Ok(EnqueueOutcome::Existing(delivery_from_row(&row)?))
             }
             Err(err) => Err(RepositoryError::Database(err.to_string()).into()),
         }

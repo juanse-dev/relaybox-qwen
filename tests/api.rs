@@ -371,3 +371,26 @@ async fn concurrent_same_key_creates_single_delivery() {
     assert_eq!(created_count, 1);
     assert_eq!(db.count_by_key("race-key").await, 1);
 }
+
+#[tokio::test]
+async fn post_accepts_bodies_larger_than_default_axum_limit() {
+    let db = common::TestDb::new();
+    let router = db.router().await;
+    let big = "x".repeat(3 * 1024 * 1024);
+
+    let (status, created) = common::post_json(
+        &router,
+        Some("key-big"),
+        &json!({
+            "target_url": "https://example.test/webhooks",
+            "payload": { "data": big },
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::CREATED);
+
+    let (status, fetched) = common::get_delivery(&router, created["id"].as_str().unwrap()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(fetched["payload"], json!({ "data": big }));
+}
