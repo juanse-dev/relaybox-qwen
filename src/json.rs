@@ -12,6 +12,153 @@ pub fn parse_value(bytes: &[u8]) -> Result<Value, InvalidJson> {
     fallback_parse(bytes).ok_or(InvalidJson)
 }
 
+/// Serializes a `Value` to compact JSON text without recursion, so deeply
+/// nested values that the parser accepts cannot overflow the stack.
+pub fn to_string(value: &Value) -> String {
+    let mut out = String::new();
+    append_value(value, &mut out);
+    out
+}
+
+/// Appends the compact JSON serialization of `value` to `out` without recursion.
+pub fn append_value(value: &Value, out: &mut String) {
+    write_value(out, value);
+}
+
+/// Appends `text` as a quoted, escaped JSON string literal to `out`.
+pub fn append_string(out: &mut String, text: &str) {
+    write_string(out, text);
+}
+
+enum PendingItem<'a> {
+    Value(&'a Value),
+    Keyed(&'a str, &'a Value),
+}
+
+enum WriteFrame<'a> {
+    Object {
+        entries: Vec<(&'a str, &'a Value)>,
+        next: usize,
+    },
+    Array {
+        items: &'a [Value],
+        next: usize,
+    },
+}
+
+fn write_value<'a>(out: &mut String, root: &'a Value) {
+    let mut stack: Vec<WriteFrame<'a>> = Vec::new();
+    let mut pending: Option<PendingItem<'a>> = Some(PendingItem::Value(root));
+
+    loop {
+        let item = match pending.take() {
+            Some(item) => item,
+            None => match next_item(out, &mut stack) {
+                Some(item) => item,
+                None => {
+                    if let Some(frame) = stack.pop() {
+                        out.push(match frame {
+                            WriteFrame::Object { .. } => '}',
+                            WriteFrame::Array { .. } => ']',
+                        });
+                        continue;
+                    }
+                    break;
+                }
+            },
+        };
+
+        let (key, value) = match item {
+            PendingItem::Value(value) => (None, value),
+            PendingItem::Keyed(key, value) => (Some(key), value),
+        };
+
+        if let Some(key) = key {
+            write_string(out, key);
+            out.push(':');
+        }
+
+        match value {
+            Value::Null => out.push_str("null"),
+            Value::Bool(true) => out.push_str("true"),
+            Value::Bool(false) => out.push_str("false"),
+            Value::Number(number) => out.push_str(&number.to_string()),
+            Value::String(text) => write_string(out, text),
+            Value::Array(items) if items.is_empty() => out.push_str("[]"),
+            Value::Object(map) if map.is_empty() => out.push_str("{}"),
+            Value::Array(items) => {
+                let first = &items[0];
+                out.push('[');
+                stack.push(WriteFrame::Array {
+                    items: items.as_slice(),
+                    next: 0,
+                });
+                pending = Some(PendingItem::Value(first));
+            }
+            Value::Object(map) => {
+                let entries: Vec<(&str, &Value)> = map
+                    .iter()
+                    .map(|(key, value)| (key.as_str(), value))
+                    .collect();
+                let (first_key, first_value) = entries[0];
+                out.push('{');
+                stack.push(WriteFrame::Object { entries, next: 0 });
+                pending = Some(PendingItem::Keyed(first_key, first_value));
+            }
+        }
+    }
+}
+
+fn next_item<'a>(out: &mut String, stack: &mut Vec<WriteFrame<'a>>) -> Option<PendingItem<'a>> {
+    let frame = stack.last_mut()?;
+    match frame {
+        WriteFrame::Object { entries, next } => {
+            *next += 1;
+            if *next < entries.len() {
+                out.push(',');
+                Some(PendingItem::Keyed(entries[*next].0, entries[*next].1))
+            } else {
+                None
+            }
+        }
+        WriteFrame::Array { items, next } => {
+            *next += 1;
+            if *next < items.len() {
+                out.push(',');
+                Some(PendingItem::Value(&items[*next]))
+            } else {
+                None
+            }
+        }
+    }
+}
+
+fn write_string(out: &mut String, text: &str) {
+    out.push('"');
+    for ch in text.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\u{08}' => out.push_str("\\b"),
+            '\u{0C}' => out.push_str("\\f"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            ch if (ch as u32) < 0x20 => {
+                let code = ch as u32;
+                out.push('\\');
+                out.push('u');
+                for shift in [12u32, 8, 4, 0] {
+                    let digit = (code >> shift) & 0xF;
+                    out.push(char::from_digit(digit, 16).expect("hex digit"));
+                }
+            }
+            ch => out.push(ch),
+        }
+    }
+    out.push('"');
+}
+
 struct Parser<'a> {
     bytes: &'a [u8],
     pos: usize,
@@ -592,5 +739,116 @@ mod tests {
     fn duplicate_object_keys_last_wins() {
         let value = parse_value(b"{\"a\":1,\"a\":2}").unwrap();
         assert_eq!(value, serde_json::json!({ "a": 2 }));
+    }
+
+    #[test]
+    fn serializes_scalars_and_simple_structures() {
+        let cases = [
+            (Value::Null, "null"),
+            (Value::Bool(true), "true"),
+            (Value::Bool(false), "false"),
+            (json_number("42"), "42"),
+            (serde_json::json!([]), "[]"),
+            (serde_json::json!({}), "{}"),
+            (serde_json::json!([1, 2]), "[1,2]"),
+            (
+                serde_json::json!({"a": [true, null]}),
+                "{\"a\":[true,null]}",
+            ),
+        ];
+        for (value, expected) in cases {
+            assert_eq!(to_string(&value), expected);
+        }
+    }
+
+    #[test]
+    fn serializes_numbers_like_serde_json() {
+        for text in [
+            "42",
+            "-7",
+            "0",
+            "-0",
+            "3.14",
+            "-1.5e+3",
+            "1E5",
+            "0.1",
+            "18446744073709551617",
+            "1e400",
+            "-1e400",
+        ] {
+            let value = json_number(text);
+            assert_eq!(to_string(&value), serde_json::to_string(&value).unwrap());
+        }
+    }
+
+    #[test]
+    fn serializes_object_keys_in_sorted_order() {
+        let value = serde_json::json!({"b": 1, "a": 2, "c": [3]});
+        assert_eq!(to_string(&value), "{\"a\":2,\"b\":1,\"c\":[3]}");
+    }
+
+    #[test]
+    fn serializes_string_escapes_like_serde_json() {
+        assert_eq!(to_string(&Value::String("a\"b".into())), "\"a\\\"b\"");
+        assert_eq!(to_string(&Value::String("a\\b".into())), "\"a\\\\b\"");
+        assert_eq!(to_string(&Value::String("\u{1}".into())), "\"\\u0001\"");
+        assert_eq!(
+            to_string(&Value::String("\n\r\t\u{8}\u{c}".into())),
+            "\"\\n\\r\\t\\b\\f\""
+        );
+
+        let text =
+            "quote\" backslash\\ tab\t nl\n cr\r bs\u{8} ff\u{c} ctrl\u{1} caf\u{e9} \u{1F600}";
+        let value = Value::String(text.to_owned());
+        assert_eq!(to_string(&value), serde_json::to_string(&value).unwrap());
+    }
+
+    fn run_on_large_stack(f: impl FnOnce() -> String + Send + 'static) -> String {
+        std::thread::Builder::new()
+            .stack_size(64 << 20)
+            .spawn(f)
+            .expect("spawn large-stack test thread")
+            .join()
+            .expect("large-stack test thread panicked")
+    }
+
+    #[test]
+    fn serializes_deeply_nested_arrays_beyond_serde_limit() {
+        let text = deep_array(50_000);
+        let input = text.clone();
+        let out = run_on_large_stack(move || {
+            let value = parse_value(input.as_bytes()).unwrap();
+            to_string(&value)
+        });
+        assert_eq!(out, text);
+    }
+
+    #[test]
+    fn serializes_deeply_nested_objects_beyond_serde_limit() {
+        let text = deep_object(50_000);
+        let input = text.clone();
+        let out = run_on_large_stack(move || {
+            let value = parse_value(input.as_bytes()).unwrap();
+            to_string(&value)
+        });
+        assert_eq!(out, text);
+    }
+
+    #[test]
+    fn serializes_mixed_deep_nesting_beyond_serde_limit() {
+        let mut text = String::new();
+        for _ in 0..25_000 {
+            text.push_str("{\"k\":[");
+        }
+        text.push('7');
+        for _ in 0..25_000 {
+            text.push_str("]}");
+        }
+        let input = text.clone();
+        let out = run_on_large_stack(move || {
+            let value = parse_value(input.as_bytes()).unwrap();
+            to_string(&value)
+        });
+        assert_eq!(out, text);
     }
 }

@@ -66,7 +66,13 @@ pub(crate) fn parse_database_url(raw: &str) -> Result<String, ConfigError> {
         return Err(ConfigError::InvalidDatabaseUrl);
     }
 
-    let rest = &raw["sqlite:".len()..];
+    // SQLx ignores URL fragments, so validation must see the same string it will use.
+    let without_fragment = match raw.split_once('#') {
+        Some((without_fragment, _)) => without_fragment,
+        None => raw,
+    };
+
+    let rest = &without_fragment["sqlite:".len()..];
     let (base, query) = match rest.split_once('?') {
         Some((base, query)) => (base, Some(query)),
         None => (rest, None),
@@ -95,7 +101,7 @@ pub(crate) fn parse_database_url(raw: &str) -> Result<String, ConfigError> {
         }
     }
 
-    Ok(raw.to_owned())
+    Ok(without_fragment.to_owned())
 }
 
 pub(crate) fn parse_bind(raw: &str) -> Result<SocketAddr, ConfigError> {
@@ -179,6 +185,28 @@ mod tests {
         ] {
             assert_eq!(parse_database_url(raw).unwrap(), raw);
         }
+    }
+
+    #[test]
+    fn parse_database_url_strips_fragment_before_validation() {
+        for raw in [
+            "sqlite:///tmp/relaybox.db?mode=memory#ignored",
+            "sqlite::memory:#frag",
+            "sqlite://relaybox.db?cache=shared&mode=memory#x",
+        ] {
+            assert_eq!(
+                parse_database_url(raw),
+                Err(ConfigError::InMemoryDatabaseUrl)
+            );
+        }
+    }
+
+    #[test]
+    fn parse_database_url_returns_fragment_stripped_url() {
+        assert_eq!(
+            parse_database_url("sqlite://relaybox.db#session").unwrap(),
+            "sqlite://relaybox.db"
+        );
     }
 
     #[test]

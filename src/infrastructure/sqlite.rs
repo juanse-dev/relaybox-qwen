@@ -47,9 +47,7 @@ impl DeliveryRepository for SqliteDeliveryRepository {
     async fn enqueue(&self, new: &NewDelivery) -> Result<EnqueueOutcome, EnqueueError> {
         let id = Uuid::new_v4();
         let created_at = format_created_at(&Utc::now());
-        let payload_text = serde_json::to_string(&new.payload).map_err(|err| {
-            RepositoryError::Database(format!("failed to serialize payload: {err}"))
-        })?;
+        let payload_text = crate::json::to_string(&new.payload);
 
         match sqlx::query(
             "INSERT INTO deliveries (id, idempotency_key, target_url, payload, status, attempts, created_at) \

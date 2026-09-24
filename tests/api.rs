@@ -565,3 +565,34 @@ async fn post_accepts_deeply_nested_payload_beyond_serde_json_limit() {
     let fetched: Value = relaybox::json::parse_value(&fetched_bytes).expect("response is JSON");
     assert_eq!(fetched["payload"], expected);
 }
+
+#[tokio::test]
+async fn post_accepts_and_persists_payload_nested_beyond_stack_safe_depth() {
+    let db = common::TestDb::new();
+    let router = db.router().await;
+
+    const DEPTH: usize = 2000;
+    let mut body = String::from("{\"target_url\":\"https://example.test/webhooks\",\"payload\":");
+    for _ in 0..DEPTH {
+        body.push('[');
+    }
+    body.push_str("null");
+    for _ in 0..DEPTH {
+        body.push(']');
+    }
+    body.push('}');
+
+    let payload_start = body.find("\"payload\":").unwrap() + "\"payload\":".len();
+    let payload_text = body[payload_start..body.len() - 1].to_string();
+
+    let (status, created_bytes) =
+        common::post_body_raw(&router, Some("deep-stack"), body.into_bytes()).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let created: Value = relaybox::json::parse_value(&created_bytes).expect("response is JSON");
+
+    let (status, fetched_bytes) =
+        common::get_delivery_raw(&router, created["id"].as_str().unwrap()).await;
+    assert_eq!(status, StatusCode::OK);
+    let fetched_text = std::str::from_utf8(&fetched_bytes).expect("response is UTF-8");
+    assert!(fetched_text.contains(payload_text.as_str()));
+}

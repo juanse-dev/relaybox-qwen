@@ -3,7 +3,7 @@ use std::sync::Arc;
 use axum::{
     body::Bytes,
     extract::{Request, State},
-    http::{HeaderMap, StatusCode},
+    http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
@@ -66,6 +66,8 @@ where
             )
         }
     };
+    // Release the raw request buffer before enqueue so large payloads do not stay resident.
+    drop(body);
 
     let mut object = match parsed {
         Value::Object(object) => object,
@@ -117,7 +119,7 @@ where
             } else {
                 StatusCode::OK
             };
-            (status, Json(delivery_json(&result.delivery))).into_response()
+            json_response(status, delivery_body(&result.delivery))
         }
         Err(err) => enqueue_error_response(err),
     }
@@ -136,7 +138,7 @@ where
     };
 
     match service.get_by_id(id).await {
-        Ok(Some(delivery)) => (StatusCode::OK, Json(delivery_json(&delivery))).into_response(),
+        Ok(Some(delivery)) => json_response(StatusCode::OK, delivery_body(&delivery)),
         Ok(None) => not_found(),
         Err(QueryError::NotFound) => not_found(),
         Err(QueryError::Repository(_)) => internal_error(),
@@ -156,15 +158,25 @@ pub(crate) async fn health() -> Response {
     (StatusCode::OK, Json(json!({ "status": "ok" }))).into_response()
 }
 
-fn delivery_json(delivery: &Delivery) -> Value {
-    json!({
-        "id": delivery.id.to_string(),
-        "status": delivery.status.as_str(),
-        "attempts": delivery.attempts,
-        "target_url": delivery.target_url,
-        "payload": delivery.payload,
-        "created_at": delivery.created_at_rfc3339(),
-    })
+fn delivery_body(delivery: &Delivery) -> String {
+    let mut out = String::from("{\"attempts\":");
+    out.push_str(&delivery.attempts.to_string());
+    out.push_str(",\"created_at\":");
+    crate::json::append_string(&mut out, &delivery.created_at_rfc3339());
+    out.push_str(",\"id\":");
+    crate::json::append_string(&mut out, &delivery.id.to_string());
+    out.push_str(",\"payload\":");
+    crate::json::append_value(&delivery.payload, &mut out);
+    out.push_str(",\"status\":");
+    crate::json::append_string(&mut out, delivery.status.as_str());
+    out.push_str(",\"target_url\":");
+    crate::json::append_string(&mut out, &delivery.target_url);
+    out.push('}');
+    out
+}
+
+fn json_response(status: StatusCode, body: String) -> Response {
+    (status, [(header::CONTENT_TYPE, "application/json")], body).into_response()
 }
 
 fn enqueue_error_response(err: EnqueueError) -> Response {
