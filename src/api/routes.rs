@@ -1,6 +1,10 @@
 use std::sync::Arc;
 
-use axum::{extract::DefaultBodyLimit, routing::get, routing::post, Router};
+use axum::{
+    extract::DefaultBodyLimit,
+    routing::{any, get, post},
+    Router,
+};
 
 use crate::api::handlers;
 use crate::application::{DeliveryRepository, DeliveryService};
@@ -14,9 +18,18 @@ where
     Router::new()
         .route(
             "/v1/deliveries",
-            post(handlers::create_delivery).layer(DefaultBodyLimit::disable()),
+            post(handlers::create_delivery)
+                .layer(DefaultBodyLimit::disable())
+                .merge(any(handlers::unsupported_method)),
         )
-        .route("/v1/deliveries/{id}", get(handlers::get_delivery))
-        .route("/health", get(handlers::health))
+        .route(
+            "/v1/deliveries/{id}",
+            get(handlers::get_delivery).merge(any(handlers::unsupported_method)),
+        )
+        .route(
+            "/health",
+            get(handlers::health).merge(any(handlers::unsupported_method)),
+        )
+        .fallback(handlers::unknown_path)
         .with_state(state)
 }

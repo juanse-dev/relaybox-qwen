@@ -3,7 +3,7 @@ mod common;
 use std::process::Stdio;
 
 use serde_json::{json, Value};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 #[tokio::test]
@@ -32,20 +32,34 @@ async fn delivery_survives_pool_reopen() {
     assert_eq!(fetched["created_at"], created["created_at"]);
 }
 
-fn free_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
-    listener.local_addr().expect("local address").port()
-}
-
-fn spawn_server(database_url: &str, bind: &str) -> tokio::process::Child {
+fn spawn_server(database_url: &str) -> tokio::process::Child {
     tokio::process::Command::new(env!("CARGO_BIN_EXE_relaybox"))
         .env("RELAYBOX_DATABASE_URL", database_url)
-        .env("RELAYBOX_BIND", bind)
+        .env("RELAYBOX_BIND", "127.0.0.1:0")
         .env("RUST_LOG", "error")
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
         .expect("spawn relaybox binary")
+}
+
+async fn wait_for_port(child: &mut tokio::process::Child) -> u16 {
+    let stdout = child.stdout.take().expect("stdout is piped");
+    let mut lines = tokio::io::BufReader::new(stdout).lines();
+    loop {
+        match lines.next_line().await.expect("read server stdout") {
+            Some(line) if line.starts_with("listening on ") => {
+                return line["listening on ".len()..]
+                    .rsplit_once(':')
+                    .expect("address has a port")
+                    .1
+                    .parse()
+                    .expect("port is numeric");
+            }
+            Some(_) => {}
+            None => panic!("server exited before reporting its address"),
+        }
+    }
 }
 
 async fn http_roundtrip(port: u16, request: &str) -> std::io::Result<(u16, String)> {
@@ -84,10 +98,9 @@ async fn wait_for_health(port: u16) {
 #[tokio::test]
 async fn delivery_survives_full_process_restart() {
     let db = common::TestDb::new();
-    let port = free_port();
-    let bind = format!("127.0.0.1:{port}");
 
-    let mut first = spawn_server(&db.url(), &bind);
+    let mut first = spawn_server(&db.url());
+    let port = wait_for_port(&mut first).await;
     wait_for_health(port).await;
 
     let payload = json!({ "event": "invoice.created", "invoice_id": "inv_456" });
@@ -111,7 +124,8 @@ async fn delivery_survives_full_process_restart() {
     first.kill().await.expect("kill first process");
     first.wait().await.expect("wait for first process");
 
-    let mut second = spawn_server(&db.url(), &bind);
+    let mut second = spawn_server(&db.url());
+    let port = wait_for_port(&mut second).await;
     wait_for_health(port).await;
 
     let request = format!(

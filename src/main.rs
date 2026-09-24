@@ -28,7 +28,11 @@ async fn main() -> Result<()> {
     let listener = TcpListener::bind(config.bind_addr)
         .await
         .with_context(|| format!("failed to bind {}", config.bind_addr))?;
-    info!(addr = %config.bind_addr, "relaybox listening");
+    let local_addr = listener
+        .local_addr()
+        .expect("bound listener has a local address");
+    info!(addr = %local_addr, "relaybox listening");
+    println!("listening on {local_addr}");
 
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())

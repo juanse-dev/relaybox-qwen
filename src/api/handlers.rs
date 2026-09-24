@@ -23,7 +23,7 @@ enum IdempotencyKeyInput {
 fn extract_idempotency_key(headers: &HeaderMap) -> IdempotencyKeyInput {
     match headers.get("Idempotency-Key") {
         None => IdempotencyKeyInput::Missing,
-        Some(value) => match value.to_str() {
+        Some(value) => match std::str::from_utf8(value.as_bytes()) {
             Ok(text) => IdempotencyKeyInput::Value(text.to_owned()),
             Err(_) => IdempotencyKeyInput::InvalidEncoding,
         },
@@ -56,7 +56,7 @@ where
         IdempotencyKeyInput::Value(value) => value,
     };
 
-    let parsed = match serde_json::from_slice::<Value>(&body) {
+    let parsed = match crate::json::parse_value(&body) {
         Ok(value) => value,
         Err(_) => {
             return error_response(
@@ -78,13 +78,20 @@ where
         }
     };
 
-    let target_url = match object.get("target_url").and_then(Value::as_str) {
-        Some(url) => url.to_owned(),
+    let target_url = match object.get("target_url") {
         None => {
             return error_response(
                 StatusCode::BAD_REQUEST,
                 "invalid_request",
                 "target_url is required and must be a string",
+            )
+        }
+        Some(Value::String(url)) => url.clone(),
+        Some(_) => {
+            return error_response(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "invalid_target_url",
+                "target_url must be a string",
             )
         }
     };
@@ -208,4 +215,20 @@ fn error_response(status: StatusCode, code: &str, message: &str) -> Response {
         Json(json!({ "error": { "code": code, "message": message } })),
     )
         .into_response()
+}
+
+pub(crate) async fn unknown_path() -> Response {
+    error_response(
+        StatusCode::NOT_FOUND,
+        "not_found",
+        "no route matches the given path",
+    )
+}
+
+pub(crate) async fn unsupported_method() -> Response {
+    error_response(
+        StatusCode::METHOD_NOT_ALLOWED,
+        "method_not_allowed",
+        "the request method is not allowed for this route",
+    )
 }

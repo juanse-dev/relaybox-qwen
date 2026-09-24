@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 
+use percent_encoding::percent_decode;
 use thiserror::Error;
 
 pub const DEFAULT_DATABASE_URL: &str = "sqlite://relaybox.db";
@@ -77,7 +78,10 @@ pub(crate) fn parse_database_url(raw: &str) -> Result<String, ConfigError> {
 
     if let Some(query) = query {
         for pair in query.split('&') {
-            let (key, value) = match pair.split_once('=') {
+            let decoded = percent_decode(pair.as_bytes())
+                .decode_utf8_lossy()
+                .into_owned();
+            let (key, value) = match decoded.split_once('=') {
                 Some((key, value)) => (key, value),
                 None => continue,
             };
@@ -125,6 +129,21 @@ mod tests {
             "sqlite::memory:?cache=shared",
             "sqlite:///tmp/relaybox.db?mode=memory",
             "sqlite:///tmp/relaybox.db?cache=shared&mode=memory",
+        ] {
+            assert_eq!(
+                parse_database_url(raw),
+                Err(ConfigError::InMemoryDatabaseUrl)
+            );
+        }
+    }
+
+    #[test]
+    fn parse_database_url_rejects_percent_encoded_in_memory_modes() {
+        for raw in [
+            "sqlite:///tmp/relaybox.db?mode=%6demory",
+            "sqlite:///tmp/relaybox.db?mo%64e=memory",
+            "sqlite:///tmp/relaybox.db?mode=mem%6Fry",
+            "sqlite:///tmp/relaybox.db?mode%3Dmemory",
         ] {
             assert_eq!(
                 parse_database_url(raw),

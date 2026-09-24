@@ -112,8 +112,8 @@ fn delivery_from_row(row: &SqliteRow) -> Result<Delivery, RepositoryError> {
 
     let id = Uuid::parse_str(&id_text)
         .map_err(|err| RepositoryError::Database(format!("invalid stored delivery id: {err}")))?;
-    let payload = serde_json::from_str(&payload_text)
-        .map_err(|err| RepositoryError::Database(format!("invalid stored payload: {err}")))?;
+    let payload = crate::json::parse_value(payload_text.as_bytes())
+        .map_err(|err| RepositoryError::Database(format!("invalid stored payload: {err:?}")))?;
     let status = DeliveryStatus::parse(&status_text)
         .ok_or_else(|| RepositoryError::Database("unknown stored delivery status".to_owned()))?;
     let attempts = u32::try_from(attempts_raw)

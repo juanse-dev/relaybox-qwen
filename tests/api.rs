@@ -229,17 +229,31 @@ async fn post_non_object_body_returns_400() {
 }
 
 #[tokio::test]
-async fn post_missing_or_invalid_target_url_returns_400() {
+async fn post_missing_target_url_returns_400() {
     let db = common::TestDb::new();
     let router = db.router().await;
 
-    for body in [
-        json!({ "payload": null }),
-        json!({ "target_url": 42, "payload": null }),
-    ] {
-        let (status, response) = common::post_json(&router, Some("key-1"), &body).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        common::assert_error(&response, "invalid_request");
+    let (status, response) =
+        common::post_json(&router, Some("key-1"), &json!({ "payload": null })).await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    common::assert_error(&response, "invalid_request");
+}
+
+#[tokio::test]
+async fn post_non_string_target_url_returns_422() {
+    let db = common::TestDb::new();
+    let router = db.router().await;
+
+    for target_url in [json!(42), json!([1]), json!(true), json!(null)] {
+        let (status, response) = common::post_json(
+            &router,
+            Some("key-1"),
+            &json!({ "target_url": target_url, "payload": null }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        common::assert_error(&response, "invalid_target_url");
     }
 }
 
@@ -461,4 +475,93 @@ async fn get_invalid_percent_encoded_id_returns_404_envelope() {
     let (status, body) = common::get_delivery(&router, encoded_id).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     common::assert_error(&body, "delivery_not_found");
+}
+
+#[tokio::test]
+async fn post_accepts_utf8_idempotency_key() {
+    let db = common::TestDb::new();
+    let router = db.router().await;
+
+    let (status, _) = common::post_json(
+        &router,
+        Some("clé-ünïcode"),
+        &json!({ "target_url": "https://example.test/webhooks", "payload": null }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::CREATED);
+}
+
+#[tokio::test]
+async fn post_rejects_non_utf8_idempotency_key() {
+    let db = common::TestDb::new();
+    let router = db.router().await;
+
+    let (status, body) = common::post_body_with_key_bytes(
+        &router,
+        Some(b"\xff"),
+        br#"{"target_url":"https://example.test/webhooks","payload":null}"#.to_vec(),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    common::assert_error(&body, "invalid_idempotency_key");
+}
+
+#[tokio::test]
+async fn unknown_path_returns_404_envelope() {
+    let db = common::TestDb::new();
+    let router = db.router().await;
+
+    let (status, body) = common::raw_request(&router, "GET", "/nope").await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    common::assert_error(&body, "not_found");
+}
+
+#[tokio::test]
+async fn unsupported_method_returns_405_envelope() {
+    let db = common::TestDb::new();
+    let router = db.router().await;
+
+    for (method, uri) in [
+        ("GET", "/v1/deliveries"),
+        (
+            "DELETE",
+            "/v1/deliveries/3f2c1a5e-9b8d-4e6f-a1c2-d3e4f5a6b7c8",
+        ),
+        ("POST", "/health"),
+    ] {
+        let (status, body) = common::raw_request(&router, method, uri).await;
+
+        assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+        common::assert_error(&body, "method_not_allowed");
+    }
+}
+
+#[tokio::test]
+async fn post_accepts_deeply_nested_payload_beyond_serde_json_limit() {
+    let db = common::TestDb::new();
+    let router = db.router().await;
+
+    let mut payload: Value = json!(null);
+    for _ in 0..300 {
+        payload = json!([payload]);
+    }
+    let expected = payload.clone();
+
+    let body = serde_json::to_vec(&json!({
+        "target_url": "https://example.test/webhooks",
+        "payload": payload
+    }))
+    .expect("serialize request body");
+    let (status, created_bytes) = common::post_body_raw(&router, Some("deep"), body).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let created: Value = relaybox::json::parse_value(&created_bytes).expect("response is JSON");
+
+    let (status, fetched_bytes) =
+        common::get_delivery_raw(&router, created["id"].as_str().unwrap()).await;
+    assert_eq!(status, StatusCode::OK);
+    let fetched: Value = relaybox::json::parse_value(&fetched_bytes).expect("response is JSON");
+    assert_eq!(fetched["payload"], expected);
 }

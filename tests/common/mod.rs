@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::body::Body;
 use http_body_util::BodyExt;
+
 use serde_json::Value;
 use tower::ServiceExt;
 
@@ -90,8 +91,72 @@ pub async fn post_json(
     post_body(router, key, bytes).await
 }
 
+pub async fn post_body_with_key_bytes(
+    router: &axum::Router,
+    key: Option<&[u8]>,
+    body: Vec<u8>,
+) -> (http::StatusCode, Value) {
+    let mut builder = http::Request::builder()
+        .method("POST")
+        .uri("/v1/deliveries");
+    if let Some(key) = key {
+        let value = http::HeaderValue::from_bytes(key).expect("header bytes are valid");
+        builder = builder.header("Idempotency-Key", value);
+    }
+    send(
+        router,
+        builder.body(Body::from(body)).expect("valid request"),
+    )
+    .await
+}
+
+pub async fn post_body_raw(
+    router: &axum::Router,
+    key: Option<&str>,
+    body: Vec<u8>,
+) -> (http::StatusCode, Vec<u8>) {
+    let mut builder = http::Request::builder()
+        .method("POST")
+        .uri("/v1/deliveries");
+    if let Some(key) = key {
+        builder = builder.header("Idempotency-Key", key);
+    }
+    send_bytes(
+        router,
+        builder.body(Body::from(body)).expect("valid request"),
+    )
+    .await
+}
+
+pub async fn raw_request(
+    router: &axum::Router,
+    method: &str,
+    uri: &str,
+) -> (http::StatusCode, Value) {
+    send(
+        router,
+        http::Request::builder()
+            .method(method)
+            .uri(uri)
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await
+}
+
 pub async fn get_delivery(router: &axum::Router, id: &str) -> (http::StatusCode, Value) {
     send(
+        router,
+        http::Request::builder()
+            .uri(format!("/v1/deliveries/{id}"))
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await
+}
+
+pub async fn get_delivery_raw(router: &axum::Router, id: &str) -> (http::StatusCode, Vec<u8>) {
+    send_bytes(
         router,
         http::Request::builder()
             .uri(format!("/v1/deliveries/{id}"))
@@ -112,7 +177,10 @@ pub async fn get_health(router: &axum::Router) -> (http::StatusCode, Value) {
     .await
 }
 
-async fn send(router: &axum::Router, request: http::Request<Body>) -> (http::StatusCode, Value) {
+async fn send_bytes(
+    router: &axum::Router,
+    request: http::Request<Body>,
+) -> (http::StatusCode, Vec<u8>) {
     let response = router
         .clone()
         .oneshot(request)
@@ -125,12 +193,21 @@ async fn send(router: &axum::Router, request: http::Request<Body>) -> (http::Sta
         .await
         .expect("body")
         .to_bytes();
+    (status, bytes.to_vec())
+}
+
+async fn send(router: &axum::Router, request: http::Request<Body>) -> (http::StatusCode, Value) {
+    let (status, bytes) = send_bytes(router, request).await;
     let value = if bytes.is_empty() {
         Value::Null
     } else {
-        serde_json::from_slice(&bytes).expect("response is JSON")
+        parse_response(&bytes)
     };
     (status, value)
+}
+
+fn parse_response(bytes: &[u8]) -> Value {
+    serde_json::from_slice(bytes).expect("response is JSON")
 }
 
 pub fn assert_error(body: &Value, code: &str) {
