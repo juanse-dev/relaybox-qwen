@@ -111,7 +111,7 @@ pub(crate) fn parse_database_url(raw: &str) -> Result<String, ConfigError> {
     }
 
     if let Some(query) = query {
-        for pair in query.split('&') {
+        for pair in split_query_pairs(query) {
             let decoded = percent_decode(pair.as_bytes())
                 .decode_utf8_lossy()
                 .into_owned();
@@ -146,6 +146,32 @@ fn split_at_query_delimiter(rest: &str) -> (&str, Option<&str>) {
         (Some(l), None) => (&rest[..l], Some(&rest[l + 1..])),
         (None, None) => (rest, None),
     }
+}
+
+fn split_query_pairs(query: &str) -> Vec<&str> {
+    let bytes = query.as_bytes();
+    let mut delimiters = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'&' {
+            delimiters.push((i, 1));
+            i += 1;
+        } else if i + 3 <= bytes.len() && bytes[i..i + 3].eq_ignore_ascii_case(b"%26") {
+            delimiters.push((i, 3));
+            i += 3;
+        } else {
+            i += 1;
+        }
+    }
+
+    let mut pairs = Vec::with_capacity(delimiters.len() + 1);
+    let mut start = 0;
+    for (pos, len) in delimiters {
+        pairs.push(&query[start..pos]);
+        start = pos + len;
+    }
+    pairs.push(&query[start..]);
+    pairs
 }
 
 pub(crate) fn parse_bind(raw: &str) -> Result<SocketAddr, ConfigError> {
@@ -391,6 +417,28 @@ mod tests {
                 Err(ConfigError::InMemoryDatabaseUrl)
             );
         }
+    }
+
+    #[test]
+    fn parse_database_url_rejects_encoded_parameter_separators_hiding_memory_mode() {
+        for raw in [
+            "sqlite:file:relaybox.db%3Fmode=memory%26cache=shared",
+            "sqlite:///tmp/relaybox.db?cache=shared%26mode=memory",
+            "sqlite:///tmp/relaybox.db?a=1&b=2%26mode=memory",
+        ] {
+            assert_eq!(
+                parse_database_url(raw),
+                Err(ConfigError::InMemoryDatabaseUrl)
+            );
+        }
+    }
+
+    #[test]
+    fn parse_database_url_keeps_double_encoded_parameter_separator_in_value() {
+        assert_eq!(
+            parse_database_url("sqlite://db?x=%2526y=1").unwrap(),
+            "sqlite://db?x=%2526y=1"
+        );
     }
 
     #[test]
