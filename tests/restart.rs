@@ -3,7 +3,7 @@ mod common;
 use std::process::Stdio;
 
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 #[tokio::test]
@@ -32,34 +32,23 @@ async fn delivery_survives_pool_reopen() {
     assert_eq!(fetched["created_at"], created["created_at"]);
 }
 
-fn spawn_server(database_url: &str) -> tokio::process::Child {
-    tokio::process::Command::new(env!("CARGO_BIN_EXE_relaybox"))
-        .env("RELAYBOX_DATABASE_URL", database_url)
-        .env("RELAYBOX_BIND", "127.0.0.1:0")
-        .env("RUST_LOG", "error")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn relaybox binary")
+fn reserve_local_port() -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve a local port");
+    let port = listener.local_addr().expect("get reserved port").port();
+    drop(listener);
+    port
 }
 
-async fn wait_for_port(child: &mut tokio::process::Child) -> u16 {
-    let stdout = child.stdout.take().expect("stdout is piped");
-    let mut lines = tokio::io::BufReader::new(stdout).lines();
-    loop {
-        match lines.next_line().await.expect("read server stdout") {
-            Some(line) if line.starts_with("listening on ") => {
-                return line["listening on ".len()..]
-                    .rsplit_once(':')
-                    .expect("address has a port")
-                    .1
-                    .parse()
-                    .expect("port is numeric");
-            }
-            Some(_) => {}
-            None => panic!("server exited before reporting its address"),
-        }
-    }
+fn spawn_server(database_url: &str, port: u16) -> tokio::process::Child {
+    tokio::process::Command::new(env!("CARGO_BIN_EXE_relaybox"))
+        .env("RELAYBOX_DATABASE_URL", database_url)
+        .env("RELAYBOX_BIND", format!("127.0.0.1:{port}"))
+        .env("RUST_LOG", "error")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("spawn relaybox binary")
 }
 
 async fn http_roundtrip(port: u16, request: &str) -> std::io::Result<(u16, String)> {
@@ -99,9 +88,9 @@ async fn wait_for_health(port: u16) {
 async fn delivery_survives_full_process_restart() {
     let db = common::TestDb::new();
 
-    let mut first = spawn_server(&db.url());
-    let port = wait_for_port(&mut first).await;
-    wait_for_health(port).await;
+    let port1 = reserve_local_port();
+    let mut first = spawn_server(&db.url(), port1);
+    wait_for_health(port1).await;
 
     let payload = json!({ "event": "invoice.created", "invoice_id": "inv_456" });
     let body_text = serde_json::to_string(
@@ -109,11 +98,11 @@ async fn delivery_survives_full_process_restart() {
     )
     .expect("serialize request");
     let request = format!(
-        "POST /v1/deliveries HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nIdempotency-Key: restart-key\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body_text}",
+        "POST /v1/deliveries HTTP/1.1\r\nHost: 127.0.0.1:{port1}\r\nIdempotency-Key: restart-key\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body_text}",
         body_text.len()
     );
 
-    let (status, text) = http_roundtrip(port, &request).await.expect("post request");
+    let (status, text) = http_roundtrip(port1, &request).await.expect("post request");
     assert_eq!(status, 201);
     let created: Value = serde_json::from_str(&text).expect("response is JSON");
     let id = created["id"]
@@ -124,14 +113,14 @@ async fn delivery_survives_full_process_restart() {
     first.kill().await.expect("kill first process");
     first.wait().await.expect("wait for first process");
 
-    let mut second = spawn_server(&db.url());
-    let port = wait_for_port(&mut second).await;
-    wait_for_health(port).await;
+    let port2 = reserve_local_port();
+    let mut second = spawn_server(&db.url(), port2);
+    wait_for_health(port2).await;
 
     let request = format!(
-        "GET /v1/deliveries/{id} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+        "GET /v1/deliveries/{id} HTTP/1.1\r\nHost: 127.0.0.1:{port2}\r\nConnection: close\r\n\r\n"
     );
-    let (status, text) = http_roundtrip(port, &request).await.expect("get request");
+    let (status, text) = http_roundtrip(port2, &request).await.expect("get request");
     assert_eq!(status, 200);
     let fetched: Value = serde_json::from_str(&text).expect("response is JSON");
     assert_eq!(fetched["payload"], payload);

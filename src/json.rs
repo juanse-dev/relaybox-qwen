@@ -4,12 +4,60 @@ use serde_json::{Map, Number, Value};
 pub struct InvalidJson;
 
 /// Parses JSON text into a `Value`, accepting nesting depths that exceed the
-/// recursion limit of the default `serde_json` parser.
+/// recursion limit of the default `serde_json` parser. Parsing is always
+/// iterative so arbitrarily deep input cannot overflow the stack, and number
+/// tokens are delegated to serde's own `Number` parsing for exact semantics.
 pub fn parse_value(bytes: &[u8]) -> Result<Value, InvalidJson> {
-    if let Ok(value) = serde_json::from_slice::<Value>(bytes) {
-        return Ok(value);
+    iterative_parse(bytes).ok_or(InvalidJson)
+}
+
+/// Compares two values for semantic equality without recursion so deeply
+/// nested values accepted by the parser cannot overflow the stack. Number
+/// comparison keeps serde's distinction between integer and float forms.
+pub fn values_equal(a: &Value, b: &Value) -> bool {
+    let mut stack = vec![(a, b)];
+    while let Some((left, right)) = stack.pop() {
+        match (left, right) {
+            (Value::Null, Value::Null) => {}
+            (Value::Bool(l), Value::Bool(r)) if l == r => {}
+            (Value::Number(l), Value::Number(r)) if l == r => {}
+            (Value::String(l), Value::String(r)) if l == r => {}
+            (Value::Array(l), Value::Array(r)) => {
+                if l.len() != r.len() {
+                    return false;
+                }
+                for (x, y) in l.iter().zip(r.iter()) {
+                    stack.push((x, y));
+                }
+            }
+            (Value::Object(l), Value::Object(r)) => {
+                if l.len() != r.len() {
+                    return false;
+                }
+                for (key, x) in l.iter() {
+                    match r.get(key) {
+                        Some(y) => stack.push((x, y)),
+                        None => return false,
+                    }
+                }
+            }
+            _ => return false,
+        }
     }
-    fallback_parse(bytes).ok_or(InvalidJson)
+    true
+}
+
+/// Destroys a value iteratively so deeply nested values accepted by the parser
+/// cannot overflow the stack during drop.
+pub fn deep_drop(value: Value) {
+    let mut stack = vec![value];
+    while let Some(node) = stack.pop() {
+        match node {
+            Value::Array(items) => stack.extend(items),
+            Value::Object(map) => stack.extend(map.into_values()),
+            _ => {}
+        }
+    }
 }
 
 /// Serializes a `Value` to compact JSON text without recursion, so deeply
@@ -259,7 +307,11 @@ fn open_container(p: &mut Parser, stack: &mut Vec<Frame>, b: u8) -> Step {
     }
 }
 
-fn fallback_parse(bytes: &[u8]) -> Option<Value> {
+/// Iterative JSON parser. It mirrors serde's accepted grammar (whitespace,
+/// escapes, surrogate pairs, number forms via the same `Number` parsing) and
+/// keeps all container state on the heap so arbitrarily deep input cannot
+/// overflow the stack. Returns `None` for any invalid document.
+fn iterative_parse(bytes: &[u8]) -> Option<Value> {
     let mut p = Parser { bytes, pos: 0 };
     p.skip_ws();
     p.peek()?;
@@ -442,7 +494,7 @@ fn parse_number(p: &mut Parser) -> Option<Number> {
         }
         _ => return None,
     }
-    if p.peek()? == b'.' {
+    if matches!(p.peek(), Some(b'.')) {
         p.bump();
         if !matches!(p.peek(), Some(b'0'..=b'9')) {
             return None;
@@ -848,6 +900,43 @@ mod tests {
         let out = run_on_large_stack(move || {
             let value = parse_value(input.as_bytes()).unwrap();
             to_string(&value)
+        });
+        assert_eq!(out, text);
+    }
+
+    fn run_on_small_stack(f: impl FnOnce() -> String + Send + 'static) -> String {
+        std::thread::Builder::new()
+            .stack_size(2 << 20)
+            .spawn(f)
+            .expect("spawn small-stack test thread")
+            .join()
+            .expect("small-stack test thread panicked")
+    }
+
+    #[test]
+    fn deep_array_lifecycle_is_stack_safe_on_small_stack() {
+        let text = deep_array(50_000);
+        let input = text.clone();
+        let out = run_on_small_stack(move || {
+            let value = parse_value(input.as_bytes()).unwrap();
+            assert!(values_equal(&value, &value));
+            let serialized = to_string(&value);
+            deep_drop(value);
+            serialized
+        });
+        assert_eq!(out, text);
+    }
+
+    #[test]
+    fn deep_object_lifecycle_is_stack_safe_on_small_stack() {
+        let text = deep_object(50_000);
+        let input = text.clone();
+        let out = run_on_small_stack(move || {
+            let value = parse_value(input.as_bytes()).unwrap();
+            assert!(values_equal(&value, &value));
+            let serialized = to_string(&value);
+            deep_drop(value);
+            serialized
         });
         assert_eq!(out, text);
     }

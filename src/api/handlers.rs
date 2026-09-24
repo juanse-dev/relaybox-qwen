@@ -71,43 +71,50 @@ where
 
     let mut object = match parsed {
         Value::Object(object) => object,
-        _ => {
+        other => {
+            crate::json::deep_drop(other);
             return error_response(
                 StatusCode::BAD_REQUEST,
                 "invalid_request",
                 "request body must be a JSON object with target_url and payload fields",
-            )
+            );
         }
     };
 
-    let target_url = match object.get("target_url") {
+    let target_url = match object.remove("target_url") {
         None => {
+            crate::json::deep_drop(Value::Object(object));
             return error_response(
                 StatusCode::BAD_REQUEST,
                 "invalid_request",
                 "target_url is required and must be a string",
-            )
+            );
         }
-        Some(Value::String(url)) => url.clone(),
-        Some(_) => {
+        Some(Value::String(url)) => url,
+        Some(other) => {
+            crate::json::deep_drop(other);
+            crate::json::deep_drop(Value::Object(object));
             return error_response(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "invalid_target_url",
                 "target_url must be a string",
-            )
+            );
         }
     };
 
     let payload = match object.remove("payload") {
         Some(payload) => payload,
         None => {
+            crate::json::deep_drop(Value::Object(object));
             return error_response(
                 StatusCode::BAD_REQUEST,
                 "invalid_request",
                 "payload is required and may be any JSON value including null",
-            )
+            );
         }
     };
+
+    crate::json::deep_drop(Value::Object(object));
 
     match service
         .enqueue(Some(key.as_str()), &target_url, payload)
@@ -119,7 +126,9 @@ where
             } else {
                 StatusCode::OK
             };
-            json_response(status, delivery_body(&result.delivery))
+            let body = delivery_body(&result.delivery);
+            crate::json::deep_drop(result.delivery.payload);
+            json_response(status, body)
         }
         Err(err) => enqueue_error_response(err),
     }
@@ -138,7 +147,11 @@ where
     };
 
     match service.get_by_id(id).await {
-        Ok(Some(delivery)) => json_response(StatusCode::OK, delivery_body(&delivery)),
+        Ok(Some(delivery)) => {
+            let body = delivery_body(&delivery);
+            crate::json::deep_drop(delivery.payload);
+            json_response(StatusCode::OK, body)
+        }
         Ok(None) => not_found(),
         Err(QueryError::NotFound) => not_found(),
         Err(QueryError::Repository(_)) => internal_error(),

@@ -27,25 +27,49 @@ impl<R: DeliveryRepository> DeliveryService<R> {
         target_url: &str,
         payload: Value,
     ) -> Result<EnqueueResult, EnqueueError> {
-        let key = normalize_idempotency_key(idempotency_key)?;
-        validate_target_url(target_url)?;
+        let key = match normalize_idempotency_key(idempotency_key) {
+            Ok(key) => key,
+            Err(err) => {
+                crate::json::deep_drop(payload);
+                return Err(err);
+            }
+        };
+        if let Err(err) = validate_target_url(target_url) {
+            crate::json::deep_drop(payload);
+            return Err(err);
+        }
 
-        let new = NewDelivery::new(key, target_url.to_owned(), payload);
+        let mut new = NewDelivery::new(key, target_url.to_owned(), payload);
 
-        match self.repository.enqueue(&new).await? {
-            EnqueueOutcome::Created(delivery) => Ok(EnqueueResult {
-                delivery,
-                created: true,
-            }),
-            EnqueueOutcome::Existing(existing) => {
-                if existing.target_url == new.target_url && existing.payload == new.payload {
+        let outcome = self.repository.enqueue(&new).await;
+        let incoming_payload = std::mem::replace(&mut new.payload, Value::Null);
+
+        match outcome {
+            Ok(EnqueueOutcome::Created(delivery)) => {
+                crate::json::deep_drop(incoming_payload);
+                Ok(EnqueueResult {
+                    delivery,
+                    created: true,
+                })
+            }
+            Ok(EnqueueOutcome::Existing(existing)) => {
+                if existing.target_url == new.target_url
+                    && crate::json::values_equal(&existing.payload, &incoming_payload)
+                {
+                    crate::json::deep_drop(incoming_payload);
                     Ok(EnqueueResult {
                         delivery: existing,
                         created: false,
                     })
                 } else {
+                    crate::json::deep_drop(existing.payload);
+                    crate::json::deep_drop(incoming_payload);
                     Err(EnqueueError::IdempotencyConflict)
                 }
+            }
+            Err(err) => {
+                crate::json::deep_drop(incoming_payload);
+                Err(err)
             }
         }
     }

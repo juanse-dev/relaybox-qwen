@@ -20,6 +20,9 @@ pub enum ConfigError {
     #[error("RELAYBOX_DATABASE_URL must not use an in-memory database")]
     InMemoryDatabaseUrl,
 
+    #[error("RELAYBOX_DATABASE_URL must specify a non-empty database path")]
+    InvalidDatabasePath,
+
     #[error("RELAYBOX_BIND must be a valid host:port address")]
     InvalidBindAddress,
 
@@ -81,6 +84,10 @@ pub(crate) fn parse_database_url(raw: &str) -> Result<String, ConfigError> {
     let decoded_base = percent_decode(base.as_bytes())
         .decode_utf8_lossy()
         .into_owned();
+
+    if decoded_base.is_empty() || decoded_base == "//" {
+        return Err(ConfigError::InvalidDatabasePath);
+    }
 
     if decoded_base == ":memory:" || decoded_base == "//:memory:" {
         return Err(ConfigError::InMemoryDatabaseUrl);
@@ -172,6 +179,16 @@ mod tests {
             assert_eq!(
                 parse_database_url(raw),
                 Err(ConfigError::InMemoryDatabaseUrl)
+            );
+        }
+    }
+
+    #[test]
+    fn parse_database_url_rejects_empty_database_path() {
+        for raw in ["sqlite:", "sqlite://"] {
+            assert_eq!(
+                parse_database_url(raw),
+                Err(ConfigError::InvalidDatabasePath)
             );
         }
     }

@@ -35,7 +35,6 @@ async fn main() -> Result<()> {
         )
     })?;
     info!(addr = %local_addr, "relaybox listening");
-    println!("listening on {local_addr}");
 
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
