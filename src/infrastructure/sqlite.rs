@@ -53,13 +53,15 @@ impl DeliveryRepository for SqliteDeliveryRepository {
 
         match sqlx::query(
             "INSERT INTO deliveries (id, idempotency_key, target_url, payload, status, attempts, created_at) \
-             VALUES (?, ?, ?, ?, 'pending', 0, ?) \
+             VALUES (?, ?, ?, ?, ?, ?, ?) \
              RETURNING id, target_url, payload, status, attempts, created_at",
         )
         .bind(id.to_string())
         .bind(&new.idempotency_key)
         .bind(&new.target_url)
         .bind(&payload_text)
+        .bind(new.status.as_str())
+        .bind(i64::from(new.attempts))
         .bind(&created_at)
         .fetch_optional(&self.pool)
         .await

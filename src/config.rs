@@ -72,7 +72,11 @@ pub(crate) fn parse_database_url(raw: &str) -> Result<String, ConfigError> {
         None => (rest, None),
     };
 
-    if base == ":memory:" || base == "//:memory:" {
+    let decoded_base = percent_decode(base.as_bytes())
+        .decode_utf8_lossy()
+        .into_owned();
+
+    if decoded_base == ":memory:" || decoded_base == "//:memory:" {
         return Err(ConfigError::InMemoryDatabaseUrl);
     }
 
@@ -144,6 +148,20 @@ mod tests {
             "sqlite:///tmp/relaybox.db?mo%64e=memory",
             "sqlite:///tmp/relaybox.db?mode=mem%6Fry",
             "sqlite:///tmp/relaybox.db?mode%3Dmemory",
+        ] {
+            assert_eq!(
+                parse_database_url(raw),
+                Err(ConfigError::InMemoryDatabaseUrl)
+            );
+        }
+    }
+
+    #[test]
+    fn parse_database_url_rejects_percent_encoded_in_memory_paths() {
+        for raw in [
+            "sqlite:%3Amemory%3A",
+            "sqlite://%3Amemory%3A",
+            "sqlite:%3amemory%3a?cache=shared",
         ] {
             assert_eq!(
                 parse_database_url(raw),

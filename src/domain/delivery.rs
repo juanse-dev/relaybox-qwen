@@ -43,4 +43,34 @@ pub struct NewDelivery {
     pub idempotency_key: String,
     pub target_url: String,
     pub payload: Value,
+    pub status: DeliveryStatus,
+    pub attempts: u32,
+}
+
+impl NewDelivery {
+    pub fn new(idempotency_key: String, target_url: String, payload: Value) -> Self {
+        Self {
+            idempotency_key,
+            target_url,
+            payload,
+            status: DeliveryStatus::Pending,
+            attempts: 0,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_delivery_starts_pending_with_zero_attempts() {
+        let new = NewDelivery::new(
+            "key-1".to_owned(),
+            "https://example.test/hook".to_owned(),
+            serde_json::json!({}),
+        );
+        assert_eq!(new.status, DeliveryStatus::Pending);
+        assert_eq!(new.attempts, 0);
+    }
 }

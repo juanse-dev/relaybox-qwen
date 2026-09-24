@@ -30,11 +30,7 @@ impl<R: DeliveryRepository> DeliveryService<R> {
         let key = normalize_idempotency_key(idempotency_key)?;
         validate_target_url(target_url)?;
 
-        let new = NewDelivery {
-            idempotency_key: key,
-            target_url: target_url.to_owned(),
-            payload,
-        };
+        let new = NewDelivery::new(key, target_url.to_owned(), payload);
 
         match self.repository.enqueue(&new).await? {
             EnqueueOutcome::Created(delivery) => Ok(EnqueueResult {
@@ -163,6 +159,25 @@ mod tests {
         }
     }
 
+    struct CapturingRepo {
+        captured: std::sync::Arc<std::sync::Mutex<Option<NewDelivery>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl DeliveryRepository for CapturingRepo {
+        async fn enqueue(&self, new: &NewDelivery) -> Result<EnqueueOutcome, EnqueueError> {
+            *self.captured.lock().unwrap() = Some(new.clone());
+            Ok(EnqueueOutcome::Created(stub_delivery(
+                &new.target_url,
+                new.payload.clone(),
+            )))
+        }
+
+        async fn get_by_id(&self, _id: Uuid) -> Result<Option<Delivery>, QueryError> {
+            Ok(None)
+        }
+    }
+
     fn stub_delivery(target_url: &str, payload: Value) -> Delivery {
         Delivery {
             id: Uuid::new_v4(),
@@ -248,5 +263,30 @@ mod tests {
             .await;
 
         assert!(matches!(result, Err(EnqueueError::IdempotencyConflict)));
+    }
+
+    #[tokio::test]
+    async fn enqueue_persists_initial_pending_state_with_zero_attempts() {
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let service = DeliveryService::new(CapturingRepo {
+            captured: captured.clone(),
+        });
+
+        service
+            .enqueue(
+                Some("key-1"),
+                "https://example.test/hook",
+                serde_json::json!({}),
+            )
+            .await
+            .unwrap();
+
+        let new = captured
+            .lock()
+            .unwrap()
+            .take()
+            .expect("repository received the new delivery");
+        assert_eq!(new.status, crate::domain::DeliveryStatus::Pending);
+        assert_eq!(new.attempts, 0);
     }
 }

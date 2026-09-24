@@ -351,9 +351,7 @@ fn parse_string(p: &mut Parser) -> Option<String> {
                     b'u' => {
                         let hi = parse_hex4(p)?;
                         let cp = if (0xD800..0xDC00).contains(&hi) {
-                            if p.peek()? != b'\\'
-                                || !p.bytes.get(p.pos + 1)?.eq_ignore_ascii_case(&b'u')
-                            {
+                            if p.peek()? != b'\\' || *p.bytes.get(p.pos + 1)? != b'u' {
                                 return None;
                             }
                             p.bump();
@@ -537,6 +535,12 @@ mod tests {
             parse_value(&raw).unwrap(),
             Value::String("caf\u{e9}".to_owned())
         );
+    }
+
+    #[test]
+    fn rejects_uppercase_u_in_surrogate_pair_continuation() {
+        let text = r#""\ud83d\Ude00""#;
+        assert_eq!(parse_value(text.as_bytes()), Err(InvalidJson));
     }
 
     #[test]

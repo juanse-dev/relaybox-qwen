@@ -28,9 +28,12 @@ async fn main() -> Result<()> {
     let listener = TcpListener::bind(config.bind_addr)
         .await
         .with_context(|| format!("failed to bind {}", config.bind_addr))?;
-    let local_addr = listener
-        .local_addr()
-        .expect("bound listener has a local address");
+    let local_addr = listener.local_addr().with_context(|| {
+        format!(
+            "failed to read local address of bound listener on {}",
+            config.bind_addr
+        )
+    })?;
     info!(addr = %local_addr, "relaybox listening");
     println!("listening on {local_addr}");
 
