@@ -108,10 +108,11 @@ fn has_empty_authority(raw: &str) -> bool {
     let Some(colon) = raw.find(':') else {
         return true;
     };
-    match raw[colon + 1..].strip_prefix("//") {
-        Some(rest) => rest.is_empty() || matches!(rest.as_bytes()[0], b'/' | b'\\' | b'?' | b'#'),
-        None => true,
-    }
+    let Some(rest) = raw[colon + 1..].strip_prefix("//") else {
+        return true;
+    };
+    let rest = rest.trim_start_matches(|c: char| c <= ' ');
+    rest.is_empty() || matches!(rest.as_bytes()[0], b'/' | b'\\' | b'?' | b'#')
 }
 
 #[cfg(test)]
@@ -174,6 +175,10 @@ mod tests {
             "http:////example.com/x",
             "http:/path",
             "http:\\path",
+            "https://\n/path",
+            "https://\t/path",
+            "https://\r/path",
+            "http://\n\n/x",
         ] {
             assert!(
                 matches!(

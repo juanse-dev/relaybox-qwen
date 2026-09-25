@@ -283,6 +283,9 @@ async fn post_invalid_target_url_returns_422() {
         "ftp://example.test/hook",
         "https:///path",
         "http:////example.com/x",
+        "https://\n/path",
+        "https://\t/path",
+        "https://\r/path",
     ] {
         let (status, body) = common::post_json(
             &router,
