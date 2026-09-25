@@ -278,7 +278,12 @@ async fn post_invalid_target_url_returns_422() {
     let db = common::TestDb::new();
     let router = db.router().await;
 
-    for target_url in ["/hooks", "ftp://example.test/hook"] {
+    for target_url in [
+        "/hooks",
+        "ftp://example.test/hook",
+        "https:///path",
+        "http:////example.com/x",
+    ] {
         let (status, body) = common::post_json(
             &router,
             Some("key-1"),

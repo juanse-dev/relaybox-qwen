@@ -95,13 +95,23 @@ pub(crate) fn validate_target_url(target_url: &str) -> Result<(), EnqueueError> 
         }
     }
 
-    if url.host_str().is_none() {
+    if url.host_str().is_none() || has_empty_authority(target_url) {
         return Err(EnqueueError::InvalidTargetUrl(
             "target_url must contain a host".to_owned(),
         ));
     }
 
     Ok(())
+}
+
+fn has_empty_authority(raw: &str) -> bool {
+    let Some(colon) = raw.find(':') else {
+        return true;
+    };
+    match raw[colon + 1..].strip_prefix("//") {
+        Some(rest) => rest.is_empty() || matches!(rest.as_bytes()[0], b'/' | b'\\' | b'?' | b'#'),
+        None => true,
+    }
 }
 
 #[cfg(test)]
@@ -140,13 +150,31 @@ mod tests {
 
     #[test]
     fn validate_target_url_accepts_http_and_https_urls_with_hosts() {
-        assert!(validate_target_url("https://example.test/webhooks").is_ok());
-        assert!(validate_target_url("http://localhost:8080/hook").is_ok());
+        for url in [
+            "https://example.test/webhooks",
+            "http://localhost:8080/hook",
+            "HTTP://EXAMPLE.TEST/X",
+            "http://user@example.test/hook",
+            "http://[::1]/x",
+        ] {
+            assert!(
+                validate_target_url(url).is_ok(),
+                "expected acceptance for {url}"
+            );
+        }
     }
 
     #[test]
     fn validate_target_url_rejects_relative_urls_other_schemes_and_missing_hosts() {
-        for url in ["/webhooks", "not a url", "ftp://example.test/hook"] {
+        for url in [
+            "/webhooks",
+            "not a url",
+            "ftp://example.test/hook",
+            "https:///path",
+            "http:////example.com/x",
+            "http:/path",
+            "http:\\path",
+        ] {
             assert!(
                 matches!(
                     validate_target_url(url),
